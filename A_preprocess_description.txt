@@ -1,0 +1,6 @@
+
+Preprocess with cleanraw, ICLabel automatic rej and visual inspection of bad time windows then different filtering:
+    -Heilbron preprocess (2 to 8 Hz)
+    -2 to 20 Hz
+    -0.01 to 20 Hz
+

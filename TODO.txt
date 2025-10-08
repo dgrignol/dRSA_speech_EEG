@@ -1,0 +1,19 @@
+TODO list in order of priority
+
+-> RAW data just with highness (e.g. withouth filter notch and re-referencing)
+-> RAW filtered 2 to 20Hz
+
+Meeting
+
+-> wav2vec model (ask Ali)
+-> word2vec model (e.g. GLOVE)
+-> try another participant
+
+
+-------------------------
+Possibilities
+-> Overlapping videos
+-> Noise and prediction
+-> Skaters and manipulation of different levels through reconstruction
+
+

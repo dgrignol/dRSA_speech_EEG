@@ -1,0 +1,9 @@
+EEG_new = clean_rawdata(EEG, ...
+                        'FlatlineCriterion', 5,...
+                        'Highpass', [0.25 0.75], ...
+                        'ChannelCriterion', );
+%phase 2
+EEG = clean_rawdata(EEG);
+
+
+

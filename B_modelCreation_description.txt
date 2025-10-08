@@ -1,0 +1,11 @@
+Creation of models:
+
+B0_prepare_stimuli function
+B1_Envelope script
+B2_wav2vec script
+B3_word2vec
+
+
+B0_prepare_stimuli is a function that:
+ -concatenates audio. 
+ -reample audio and then concatenate them.
