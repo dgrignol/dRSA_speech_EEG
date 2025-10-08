@@ -1,6 +1,10 @@
 
+A1_preprocess_EEG
 Preprocess with cleanraw, ICLabel automatic rej and visual inspection of bad time windows then different filtering:
     -Heilbron preprocess (2 to 8 Hz)
     -2 to 20 Hz
     -0.01 to 20 Hz
 
+A2_prepare_stimuli is a function that:
+ -concatenates audio. 
+ -reample audio and then concatenate them.

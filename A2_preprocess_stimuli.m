@@ -24,9 +24,9 @@ else
     warning('A2_preprocess_stimuli:EEGLABPathMissing', 'EEGLAB path not set in config_paths.json.');
 end
 
-mergedAudioPath = fullfile(basePathStimuli, 'Audio', 'audio_merged.wav');
-if isfile(mergedAudioPath)
-    fprintf('Merged audio already present: %s\n', mergedAudioPath);
+mergedResampledAudioPath = fullfile(basePathStimuli, 'Audio', 'audio_resampled_merged.wav');
+if isfile(mergedResampledAudioPath)
+    fprintf('Merged resampled audio already present: %s\n', mergedResampledAudioPath);
 else
     fprintf('Resampling audio files to %d Hz...\n', targetFs);
     resample_audio_files(basePathStimuli, numOfStim, targetFs);
@@ -51,7 +51,17 @@ else
               numel(mergedAudio), numel(EEG_merged.data));
     end
 
-    fprintf('Audio preprocessing complete. Output saved to: %s\n', mergedAudioPath);
-    fprintf('Resampled fs reported by merge_audio_files: %g Hz\n', fs_check);
+    fprintf('Audio preprocessing complete. Output saved to: %s\n', mergedResampledAudioPath);
+    fprintf('Resampled fs reported by merge_resampled_audio_files: %g Hz\n', fs_check);
     fprintf('Mask saved to: %s\n', fullfile(basePathMasks, 'mask_concat.mat'));
 end
+
+mergedOriginalAudioPath = fullfile(basePathStimuli, 'Audio', 'audio_original_merged.wav');
+if isfile(mergedOriginalAudioPath)
+    fprintf('Merged original audio already present: %s\n', mergedOriginalAudioPath);
+else
+    stimuliDir = fullfile(basePathStimuli, 'Audio');
+    mergedAudio = merge_original_audio_files(stimuliDir);
+    fprintf('Original audio merging complete. Output saved to: %s\n', mergedOriginalAudioPath);
+end
+
