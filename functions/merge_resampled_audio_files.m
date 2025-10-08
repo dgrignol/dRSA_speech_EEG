@@ -1,4 +1,4 @@
-function [mergedAudio, fs_check, maskConcat] = merge_audio_files(stimuliDir, maskFolderPath, test, sartEnd_span)
+function [mergedAudio, fs_check, maskConcat] = merge_resampled_audio_files(stimuliDir, maskFolderPath, test, sartEnd_span)
     % Merge individual resampled audio files into one audio_merged.wav file
     % and build a mask in the concatenation points
     %

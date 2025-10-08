@@ -10,8 +10,10 @@ function resample_audio_files(basePathStimuli, numOfStim, targetFs)
 
 
     % Load lengths and check total
-    lengthsFile = fullfile(basePathStimuli, 'Envelopes', 'audio_lengths.mat');
-    lengthsData = load(lengthsFile);  % assumes variable is named 'lengths'
+%     lengthsFile = fullfile(basePathStimuli, 'Envelopes', 'audio_lengths.mat');
+    lengthsData = load('audio_lengths.mat');  % assumes variable exist in a loaded path (e.g. functions)
+
+    % Assumes var loaded is named 'lengths' (so lengthsData.lengths)
 
 
     for runNum = 1:numOfStim
