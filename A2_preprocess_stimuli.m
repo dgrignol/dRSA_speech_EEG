@@ -43,7 +43,7 @@ else
 
     stimuliDir = fullfile(basePathStimuli, 'Audio');
     testMode = false;
-    [mergedAudio, fs_check, maskConcat] = merge_audio_files(stimuliDir, basePathMasks, testMode, sartEnd_span);
+    [mergedAudio, fs_check, maskConcat] = merge_resample_audio_files(stimuliDir, basePathMasks, testMode, sartEnd_span);
 
     if numel(mergedAudio) ~= numel(EEG_merged.data)
         error('A2_preprocess_stimuli:LengthMismatch', ...
