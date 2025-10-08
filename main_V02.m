@@ -1,7 +1,7 @@
 close all; clear all;
 
 eeglabDir = '/Users/damiano/Documents/MATLAB/eeglab2025.0.0'; % e.g., '/path/to/toolboxes/eeglab2025.0.0'
-repoBase = '/Users/damiano/Documents/UniTn/Dynamo_ch/dRSA_speech_V02';      % e.g., '/path/to/dRSA_speech_V02'
+repoBase = '/Users/damiano/Documents/UniTn/Dynamo_ch/dRSA_speech_EEG';      % e.g., '/path/to/dRSA_speech_V02'
 
 if isempty(repoBase)
     repoBase = fileparts(mfilename('fullpath'));
