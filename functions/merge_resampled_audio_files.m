@@ -19,7 +19,7 @@ function [mergedAudio, fs_check, maskConcat] = merge_resampled_audio_files(stimu
         sartEnd_span = 3;  % default to 3 seconds if not provided
     end
 
-    outputFile = fullfile(stimuliDir, 'audio_merged.wav');
+    outputFile = fullfile(stimuliDir, 'audio_resampled_merged.wav');
 
     % Number of stimuli to merge
     if test
