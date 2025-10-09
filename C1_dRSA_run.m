@@ -12,7 +12,7 @@ basePathOutput = paths.results;
 basePathModels = paths.models;
 preproc_type = '0.01to20Hz';
 numOfSubj = 19;
-re_run_dRSA = true;
+re_run_dRSA = false;
 lagWindowSec = [-3 3];
 
 if ~isfolder(basePathEEG)
@@ -36,6 +36,7 @@ end
 
 hilbertModelPath = fullfile(basePathModels, 'Envelopes_Hilbert_128Hz', 'envelope_Hilbert.mat');
 heilbModelPath = fullfile(basePathModels, 'Envelopes_Heilb_128Hz', 'envelope_Heilb.mat');
+wav2vec2ModelPath = fullfile(basePathModels, 'wav2vec2', 'wav2vec2_embeddings.mat');
 
 if ~isfile(hilbertModelPath)
     error('C1_dRSA_run:HilbertModelMissing', 'Hilbert envelope model not found: %s', hilbertModelPath);
@@ -43,12 +44,20 @@ end
 if ~isfile(heilbModelPath)
     error('C1_dRSA_run:HeilbronModelMissing', 'Heilbron envelope model not found: %s', heilbModelPath);
 end
-
+wav2vec2FieldsRequired = {'embeddings', 'time_axis'};
+if ~isfile(wav2vec2ModelPath)
+    error('C1_dRSA_run:wav2vec2ModelMissing', 'wav2vec2 model not found: %s', wav2vec2ModelPath);
+end
 env_Hilbert = load(hilbertModelPath);
 env_Heilbron = load(heilbModelPath);
+wav2vec2Base = load(wav2vec2ModelPath);
+if ~all(isfield(wav2vec2Base, wav2vec2FieldsRequired))
+    error('C1_dRSA_run:wav2vec2FieldsMissing', ...
+        'wav2vec2 MAT file must contain: %s', strjoin(wav2vec2FieldsRequired, ', '));
+end
 
-models.data = {env_Hilbert.env_model_data', env_Heilbron.env_model_data'};
-models.labels = {'AudioEnvelopeHilbert', 'AudioEnvelopeHeilbron'};
+models.data = {env_Hilbert.env_model_data', env_Heilbron.env_model_data', []};
+models.labels = {'AudioEnvelopeHilbert', 'AudioEnvelopeHeilbron', 'wav2vec2.0'};
 
 for subjNum = 1:numOfSubj
     fprintf('\nSubject %02d\n', subjNum);
@@ -71,6 +80,10 @@ for subjNum = 1:numOfSubj
     end
 
     EEG_merged = pop_loadset(eegMergedFile, eegMergedPath);
+
+    neural_len = size(EEG_merged.data, 2);
+    neural_fs = EEG_merged.srate;
+    models.data{3} = upsample_wav2vec2_embeddings(wav2vec2Base, neural_len, neural_fs)';
 
     for modelNum = 1:numel(models.data)
         model_len = size(models.data{modelNum}, 2);
@@ -108,7 +121,7 @@ for subjNum = 1:numOfSubj
     opt.nIter = 100;
     opt.dRSA.corrMethod = 'corr';
     opt.dRSA.Normalize = 'Rescale';
-    opt.distanceMeasureModel = {'euclidean', 'euclidean'};
+    opt.distanceMeasureModel = {'euclidean', 'euclidean','correlation'};
     opt.distanceMeasureNeural = 'correlation';
     opt.sampleDur = 1 / EEG_merged.srate;
     opt.SubSampleDur = round(opt.SubSampleDurSec / opt.sampleDur);
@@ -263,4 +276,32 @@ for model_num = 1:nModels
                        mRSA_diag_avg, mRSA_diag_std, ...
                        nRSA_diag_avg, nRSA_diag_std, ...
                        Fs_group, title_plot, lagWindowSec);
+end
+
+function resampled = upsample_wav2vec2_embeddings(wav2vec2Data, targetLen, targetFs)
+%UPSAMPLE_WAV2VEC2_EMBEDDINGS Interpolate wav2vec2 embeddings onto neural timeline.
+
+    required = {'embeddings', 'time_axis'};
+    if ~all(isfield(wav2vec2Data, required))
+        error('upsample_wav2vec2_embeddings:MissingFields', ...
+            'Expected fields missing from wav2vec2 data: %s', strjoin(required, ', '));
+    end
+
+    originalTimes = wav2vec2Data.time_axis(:);
+    embeddings = wav2vec2Data.embeddings;
+
+    if numel(originalTimes) ~= size(embeddings, 1)
+        error('upsample_wav2vec2_embeddings:TimeMismatch', ...
+            'Length of time axis (%d) does not match embedding rows (%d).', ...
+            numel(originalTimes), size(embeddings, 1));
+    end
+
+    startTime = originalTimes(1);
+    targetTimes = startTime + (0:targetLen - 1)' ./ targetFs;
+
+    embedClass = class(embeddings);
+    resampled = interp1(originalTimes, double(embeddings), targetTimes, 'linear', 'extrap');
+    if ~strcmp(embedClass, 'double')
+        resampled = cast(resampled, embedClass);
+    end
 end
