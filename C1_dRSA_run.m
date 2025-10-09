@@ -55,8 +55,33 @@ if ~all(isfield(wav2vec2Base, wav2vec2FieldsRequired))
     error('C1_dRSA_run:wav2vec2FieldsMissing', ...
         'wav2vec2 MAT file must contain: %s', strjoin(wav2vec2FieldsRequired, ', '));
 end
+referenceLen = [];
+referenceFs = [];
+preloadedEEG = [];
+firstSubjectIdx = NaN;
+for subjProbe = 1:numOfSubj
+    eegCandidateFile = sprintf('Subject%d_ICA_rej_preproc%s_merged.set', subjProbe, preproc_type);
+    eegCandidatePath = fullfile(basePathEEG, sprintf('Subject%d', subjProbe));
+    candidateFullPath = fullfile(eegCandidatePath, eegCandidateFile);
+    if isfile(candidateFullPath)
+        preloadedEEG = pop_loadset(eegCandidateFile, eegCandidatePath);
+        referenceLen = size(preloadedEEG.data, 2);
+        referenceFs = preloadedEEG.srate;
+        firstSubjectIdx = subjProbe;
+        fprintf('Using Subject %02d to define wav2vec2 resampling grid (%d samples @ %.2f Hz).\n', ...
+            subjProbe, referenceLen, referenceFs);
+        break;
+    end
+end
 
-models.data = {env_Hilbert.env_model_data', env_Heilbron.env_model_data', []};
+if isempty(referenceLen)
+    error('C1_dRSA_run:NoEEGFound', ...
+        'Unable to locate any merged EEG dataset to define wav2vec2 resampling.');
+end
+
+wav2vec2Resampled = upsample_wav2vec2_embeddings(wav2vec2Base, referenceLen, referenceFs)';
+
+models.data = {env_Hilbert.env_model_data', env_Heilbron.env_model_data', wav2vec2Resampled};
 models.labels = {'AudioEnvelopeHilbert', 'AudioEnvelopeHeilbron', 'wav2vec2.0'};
 
 for subjNum = 1:numOfSubj
@@ -79,11 +104,24 @@ for subjNum = 1:numOfSubj
         continue;
     end
 
-    EEG_merged = pop_loadset(eegMergedFile, eegMergedPath);
+    if subjNum == firstSubjectIdx && ~isempty(preloadedEEG)
+        EEG_merged = preloadedEEG;
+    else
+        EEG_merged = pop_loadset(eegMergedFile, eegMergedPath);
+    end
 
     neural_len = size(EEG_merged.data, 2);
     neural_fs = EEG_merged.srate;
-    models.data{3} = upsample_wav2vec2_embeddings(wav2vec2Base, neural_len, neural_fs)';
+    if neural_len ~= referenceLen
+        error('C1_dRSA_run:NeuralLengthMismatch', ...
+            'Subject %02d EEG length (%d) differs from reference length (%d).', ...
+            subjNum, neural_len, referenceLen);
+    end
+    if abs(neural_fs - referenceFs) > 1e-6
+        warning('C1_dRSA_run:SamplingRateMismatch', ...
+            'Subject %02d EEG sampling rate (%.6f Hz) differs from reference (%.6f Hz).', ...
+            subjNum, neural_fs, referenceFs);
+    end
 
     for modelNum = 1:numel(models.data)
         model_len = size(models.data{modelNum}, 2);
