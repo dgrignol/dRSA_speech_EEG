@@ -17,7 +17,14 @@ from typing import List, Tuple
 import numpy as np
 import torch
 import torchaudio
-from transformers import Wav2Vec2Model, Wav2Vec2Processor
+from scipy.io import wavfile as scipy_wavfile
+
+if "MKL_NUM_THREADS" in os.environ:
+    try:
+        int(os.environ["MKL_NUM_THREADS"])
+    except (ValueError, TypeError):
+        del os.environ["MKL_NUM_THREADS"]
+from transformers import AutoFeatureExtractor, Wav2Vec2Model
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         default="auto",
-        choices=("auto", "cpu", "cuda"),
-        help="Inference device. Use `auto` to prefer CUDA when available.",
+        choices=("auto", "cpu", "cuda", "mps"),
+        help="Inference device. `auto` prefers MPS (Apple) or CUDA when available.",
     )
     parser.add_argument(
         "--chunk-seconds",
@@ -64,14 +71,38 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_device(device_choice: str) -> torch.device:
     if device_choice == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device_choice)
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+    if device_choice == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("Requested MPS device, but torch.backends.mps.is_available() is False.")
+        return torch.device("mps")
+    if device_choice == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("Requested CUDA device, but torch.cuda.is_available() is False.")
+        return torch.device("cuda")
+    return torch.device("cpu")
 
 
 def load_audio(audio_path: Path, target_sr: int) -> Tuple[torch.Tensor, int]:
-    waveform, sample_rate = torchaudio.load(audio_path)
-    if waveform.dim() != 2:
-        raise RuntimeError(f"Unexpected audio tensor shape {waveform.shape}")
+    try:
+        waveform, sample_rate = torchaudio.load(audio_path)
+    except RuntimeError:
+        sample_rate, waveform_np = scipy_wavfile.read(audio_path)
+        if waveform_np.ndim == 1:
+            waveform_np = waveform_np[:, None]
+        orig_dtype = waveform_np.dtype
+        waveform_np = waveform_np.astype(np.float32)
+        if np.issubdtype(orig_dtype, np.integer):
+            max_val = np.iinfo(orig_dtype).max
+            waveform_np /= max_val
+        waveform = torch.from_numpy(waveform_np.T)
+    else:
+        if waveform.dim() != 2:
+            raise RuntimeError(f"Unexpected audio tensor shape {waveform.shape}")
 
     if waveform.size(0) > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
@@ -95,7 +126,7 @@ def compute_total_stride(model_config) -> int:
 def run_inference(
     waveform: torch.Tensor,
     sample_rate: int,
-    processor: Wav2Vec2Processor,
+    feature_extractor,
     model: Wav2Vec2Model,
     device: torch.device,
     chunk_seconds: float,
@@ -112,7 +143,7 @@ def run_inference(
         for start in range(0, num_samples, chunk_size):
             end = min(start + chunk_size, num_samples)
             chunk = waveform[start:end].numpy()
-            inputs = processor(
+            inputs = feature_extractor(
                 chunk,
                 sampling_rate=sample_rate,
                 return_tensors="pt",
@@ -142,17 +173,22 @@ def main() -> None:
 
     args.output.mkdir(parents=True, exist_ok=True)
 
-    processor = Wav2Vec2Processor.from_pretrained(args.model)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(args.model)
     model = Wav2Vec2Model.from_pretrained(args.model)
     model.to(device)
 
-    target_sr = processor.feature_extractor.sampling_rate
+    target_sr = getattr(feature_extractor, "sampling_rate", None)
+    if target_sr is None:
+        raise ValueError(
+            "Selected model does not expose a sampling_rate. "
+            "Please choose a wav2vec2 checkpoint with an associated feature extractor."
+        )
     waveform, sample_rate = load_audio(args.audio, target_sr)
 
     embeddings = run_inference(
         waveform=waveform,
         sample_rate=sample_rate,
-        processor=processor,
+        feature_extractor=feature_extractor,
         model=model,
         device=device,
         chunk_seconds=args.chunk_seconds,
