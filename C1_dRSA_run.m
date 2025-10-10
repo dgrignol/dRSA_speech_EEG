@@ -17,6 +17,8 @@ preproc_type = '0.01to20Hz';
 numOfSubj = 19;
 re_run_dRSA = false;
 lagWindowSec = [-3 3];
+wav2vec2LayerIndices = [24]; % indices of wav2vec2 layers to include (e.g., [0 6 12 18 24])
+wav2vec2DistanceMeasure = 'correlation'; % distance measure for wav2vec2 models
 
 % Verify that essential directories exist (create outputs if needed).
 if ~isfolder(basePathEEG)
@@ -58,19 +60,16 @@ if ~isfield(wav2vec2Metadata, 'layers') || isempty(wav2vec2Metadata.layers)
     error('C1_dRSA_run:wav2vec2LayersMissing', ...
         'wav2vec2 metadata does not describe layer MAT files: %s', wav2vec2MetadataPath);
 end
-finalLayerFile = wav2vec2Metadata.layers(end).mat_file;
-wav2vec2ModelPath = fullfile(basePathModels, 'wav2vec2', finalLayerFile);
-wav2vec2FieldsRequired = {'embeddings', 'time_axis'};
-if ~isfile(wav2vec2ModelPath)
-    error('C1_dRSA_run:wav2vec2ModelMissing', 'wav2vec2 layer not found: %s', wav2vec2ModelPath);
+layerIndicesAvailable = arrayfun(@(layer) layer.index, wav2vec2Metadata.layers);
+[isLayerPresent, layerPositions] = ismember(wav2vec2LayerIndices, layerIndicesAvailable);
+if ~all(isLayerPresent)
+    missingLayers = wav2vec2LayerIndices(~isLayerPresent);
+    error('C1_dRSA_run:wav2vec2LayerNotFound', ...
+        'Requested wav2vec2 layer indices not available: %s', num2str(missingLayers));
 end
+selectedLayerEntries = wav2vec2Metadata.layers(layerPositions);
 env_Hilbert = load(hilbertModelPath);
 env_Heilbron = load(heilbModelPath);
-wav2vec2Base = load(wav2vec2ModelPath);
-if ~all(isfield(wav2vec2Base, wav2vec2FieldsRequired))
-    error('C1_dRSA_run:wav2vec2FieldsMissing', ...
-        'wav2vec2 MAT file must contain: %s', strjoin(wav2vec2FieldsRequired, ', '));
-end
 
 % Identify a reference subject to establish the shared EEG grid to resample the wav2vec2 model.
 referenceLen = [];
@@ -98,12 +97,34 @@ if isempty(referenceLen)
         'Unable to locate any merged EEG dataset to define wav2vec2 resampling.');
 end
 
-% Upsample the wav2vec2 embeddings once using the reference EEG grid.
-wav2vec2Resampled = upsample_wav2vec2_embeddings(wav2vec2Base, referenceLen, referenceFs)';
+% Upsample the selected wav2vec2 embeddings once using the reference EEG grid.
+wav2vec2FieldsRequired = {'embeddings', 'time_axis'};
+wav2vec2Resampled = cell(1, numel(selectedLayerEntries));
+wav2vec2Labels = cell(1, numel(selectedLayerEntries));
+for layerIdx = 1:numel(selectedLayerEntries)
+    layerMatPath = fullfile(basePathModels, 'wav2vec2', selectedLayerEntries(layerIdx).mat_file);
+    if ~isfile(layerMatPath)
+        error('C1_dRSA_run:wav2vec2LayerMissing', ...
+            'wav2vec2 layer file not found: %s', layerMatPath);
+    end
+    wav2vec2LayerData = load(layerMatPath);
+    if ~all(isfield(wav2vec2LayerData, wav2vec2FieldsRequired))
+        error('C1_dRSA_run:wav2vec2FieldsMissing', ...
+            'wav2vec2 layer file %s missing fields: %s', layerMatPath, strjoin(wav2vec2FieldsRequired, ', '));
+    end
+    wav2vec2Resampled{layerIdx} = upsample_wav2vec2_embeddings(wav2vec2LayerData, referenceLen, referenceFs)';
+    layerLabel = selectedLayerEntries(layerIdx).label;
+    if isstring(layerLabel) || ischar(layerLabel)
+        layerLabel = char(layerLabel);
+    else
+        layerLabel = sprintf('layer%d', selectedLayerEntries(layerIdx).index);
+    end
+    wav2vec2Labels{layerIdx} = sprintf('wav2vec2.%s', layerLabel);
+end
 
 % Package model matrices for the dRSA pipeline.
-models.data = {env_Hilbert.env_model_data', env_Heilbron.env_model_data', wav2vec2Resampled};
-models.labels = {'AudioEnvelopeHilbert', 'AudioEnvelopeHeilbron', 'wav2vec2.0'};
+models.data = [{env_Hilbert.env_model_data'}, {env_Heilbron.env_model_data'}, wav2vec2Resampled{:}];
+models.labels = [{'AudioEnvelopeHilbert'}, {'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}];
 
 % Iterate through subjects, executing the dRSA analysis as needed.
 for subjNum = 1:numOfSubj
@@ -189,7 +210,7 @@ for subjNum = 1:numOfSubj
     opt.nIter = 100;
     opt.dRSA.corrMethod = 'corr';
     opt.dRSA.Normalize = 'Rescale';
-    opt.distanceMeasureModel = {'euclidean', 'euclidean','correlation'};
+    opt.distanceMeasureModel = [{'euclidean', 'euclidean'}, repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];
     opt.distanceMeasureNeural = 'correlation';
     opt.sampleDur = 1 / EEG_merged.srate;
     opt.SubSampleDur = round(opt.SubSampleDurSec / opt.sampleDur);
