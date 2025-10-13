@@ -1,9 +1,8 @@
-EEG_new = clean_rawdata(EEG, ...
-                        'FlatlineCriterion', 5,...
-                        'Highpass', [0.25 0.75], ...
-                        'ChannelCriterion', );
-%phase 2
-EEG = clean_rawdata(EEG);
-
-
+venvPy = fullfile(pwd, '.venv', 'bin', 'python');
+pe = pyenv;
+if pe.Status == "Loaded" && pe.Executable ~= venvPy
+    error("MATLAB already loaded a different Python: %s", pe.Executable);
+elseif pe.Status ~= "Loaded"
+    pyenv('Version', venvPy);
+end
 

@@ -1,20 +1,26 @@
+% Reset MATLAB environment for a clean run.
 clearvars;
 close all;
 clc;
 
+% Load repository path configuration and add required helper folders.
 paths = load_paths_config();
 addpath(paths.eeglab)
 addpath(paths.functions)
 
+% Define core directories and dRSA configuration parameters.
 basePathEEG = paths.dataEEG;
 basePathMasks = paths.masks;
 basePathOutput = paths.results;
 basePathModels = paths.models;
-preproc_type = '0.01to20Hz';
-numOfSubj = 19;
+preproc_type = '2to20Hz';
+numOfSubj = 1;
 re_run_dRSA = true;
 lagWindowSec = [-3 3];
+wav2vec2LayerIndices = [0 6 12 18 24]; % indices of wav2vec2 layers to include (e.g., [0 6 12 18 24])
+wav2vec2DistanceMeasure = 'correlation'; % distance measure for wav2vec2 models
 
+% Verify that essential directories exist (create outputs if needed).
 if ~isfolder(basePathEEG)
     error('C1_dRSA_run:EEGPathMissing', 'EEG data folder not found: %s', basePathEEG);
 end
@@ -28,32 +34,104 @@ if ~isfolder(paths.subsamples)
     mkdir(paths.subsamples);
 end
 
+% Launch EEGLAB (headless) if the toolbox path is configured.
 if ~isempty(paths.eeglab)
     eeglab nogui;
 else
     warning('C1_dRSA_run:EEGLABPathMissing', 'EEGLAB path not set in config_paths.json.');
 end
 
-hilbertModelPath = fullfile(basePathModels, 'Envelopes_Hilbert_128Hz', 'envelope_Hilbert.mat');
+% hilbertModelPath = fullfile(basePathModels, 'Envelopes_Hilbert_128Hz', 'envelope_Hilbert.mat');
 heilbModelPath = fullfile(basePathModels, 'Envelopes_Heilb_128Hz', 'envelope_Heilb.mat');
+wav2vec2MetadataPath = fullfile(basePathModels, 'wav2vec2', 'wav2vec2_embeddings.json');
 
-if ~isfile(hilbertModelPath)
-    error('C1_dRSA_run:HilbertModelMissing', 'Hilbert envelope model not found: %s', hilbertModelPath);
-end
+% Confirm required model artefacts are present before proceeding.
+% if ~isfile(hilbertModelPath)
+%     error('C1_dRSA_run:HilbertModelMissing', 'Hilbert envelope model not found: %s', hilbertModelPath);
+% end
 if ~isfile(heilbModelPath)
     error('C1_dRSA_run:HeilbronModelMissing', 'Heilbron envelope model not found: %s', heilbModelPath);
 end
-
-env_Hilbert = load(hilbertModelPath);
+if ~isfile(wav2vec2MetadataPath)
+    error('C1_dRSA_run:wav2vec2MetadataMissing', 'wav2vec2 metadata not found: %s', wav2vec2MetadataPath);
+end
+wav2vec2Metadata = jsondecode(fileread(wav2vec2MetadataPath));
+if ~isfield(wav2vec2Metadata, 'layers') || isempty(wav2vec2Metadata.layers)
+    error('C1_dRSA_run:wav2vec2LayersMissing', ...
+        'wav2vec2 metadata does not describe layer MAT files: %s', wav2vec2MetadataPath);
+end
+layerIndicesAvailable = arrayfun(@(layer) layer.index, wav2vec2Metadata.layers);
+[isLayerPresent, layerPositions] = ismember(wav2vec2LayerIndices, layerIndicesAvailable);
+if ~all(isLayerPresent)
+    missingLayers = wav2vec2LayerIndices(~isLayerPresent);
+    error('C1_dRSA_run:wav2vec2LayerNotFound', ...
+        'Requested wav2vec2 layer indices not available: %s', num2str(missingLayers));
+end
+selectedLayerEntries = wav2vec2Metadata.layers(layerPositions);
+% env_Hilbert = load(hilbertModelPath);
 env_Heilbron = load(heilbModelPath);
 
-models.data = {env_Hilbert.env_model_data', env_Heilbron.env_model_data'};
-models.labels = {'AudioEnvelopeHilbert', 'AudioEnvelopeHeilbron'};
+% Identify a reference subject to establish the shared EEG grid to resample the wav2vec2 model.
+referenceLen = [];
+referenceFs = [];
+preloadedEEG = [];
+firstSubjectIdx = NaN;
+for subjProbe = 1:numOfSubj
+    eegCandidateFile = sprintf('Subject%d_ICA_rej_preproc%s_merged.set', subjProbe, preproc_type);
+    eegCandidatePath = fullfile(basePathEEG, sprintf('Subject%d', subjProbe));
+    candidateFullPath = fullfile(eegCandidatePath, eegCandidateFile);
+    if isfile(candidateFullPath)
+        preloadedEEG = pop_loadset(eegCandidateFile, eegCandidatePath);
+        referenceLen = size(preloadedEEG.data, 2);
+        referenceFs = preloadedEEG.srate;
+        firstSubjectIdx = subjProbe;
+        fprintf('Using Subject %02d to define wav2vec2 resampling grid (%d samples @ %.2f Hz).\n', ...
+            subjProbe, referenceLen, referenceFs);
+        break;
+    end
+end
 
+% Abort if no EEG dataset could be located.
+if isempty(referenceLen)
+    error('C1_dRSA_run:NoEEGFound', ...
+        'Unable to locate any merged EEG dataset to define wav2vec2 resampling.');
+end
+
+% Upsample the selected wav2vec2 embeddings once using the reference EEG grid.
+wav2vec2FieldsRequired = {'embeddings', 'time_axis'};
+wav2vec2Resampled = cell(1, numel(selectedLayerEntries));
+wav2vec2Labels = cell(1, numel(selectedLayerEntries));
+for layerIdx = 1:numel(selectedLayerEntries)
+    layerMatPath = fullfile(basePathModels, 'wav2vec2', selectedLayerEntries(layerIdx).mat_file);
+    if ~isfile(layerMatPath)
+        error('C1_dRSA_run:wav2vec2LayerMissing', ...
+            'wav2vec2 layer file not found: %s', layerMatPath);
+    end
+    wav2vec2LayerData = load(layerMatPath);
+    if ~all(isfield(wav2vec2LayerData, wav2vec2FieldsRequired))
+        error('C1_dRSA_run:wav2vec2FieldsMissing', ...
+            'wav2vec2 layer file %s missing fields: %s', layerMatPath, strjoin(wav2vec2FieldsRequired, ', '));
+    end
+    wav2vec2Resampled{layerIdx} = upsample_wav2vec2_embeddings(wav2vec2LayerData, referenceLen, referenceFs)';
+    layerLabel = selectedLayerEntries(layerIdx).label;
+    if isstring(layerLabel) || ischar(layerLabel)
+        layerLabel = char(layerLabel);
+    else
+        layerLabel = sprintf('layer%d', selectedLayerEntries(layerIdx).index);
+    end
+    wav2vec2Labels{layerIdx} = sprintf('wav2vec2.%s', layerLabel);
+end
+
+% Package model matrices for the dRSA pipeline.
+models.data = [{env_Heilbron.env_model_data'}, wav2vec2Resampled{:}]; % {env_Hilbert.env_model_data'}, 
+models.labels = [{'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}]; %{'AudioEnvelopeHilbert'}, 
+
+% Iterate through subjects, executing the dRSA analysis as needed.
 for subjNum = 1:numOfSubj
     fprintf('\nSubject %02d\n', subjNum);
     resultFile = fullfile(basePathOutput, sprintf('dRSA_%s_subj%02d.mat', preproc_type, subjNum));
 
+    % Skip subjects with existing results unless re-run is requested.
     if ~re_run_dRSA && isfile(resultFile)
         fprintf('Skipping subject %02d: existing results %s\n', subjNum, resultFile);
         continue;
@@ -63,6 +141,7 @@ for subjNum = 1:numOfSubj
 
     eegMergedFile = sprintf('Subject%d_ICA_rej_preproc%s_merged.set', subjNum, preproc_type);
     eegMergedPath = fullfile(basePathEEG, sprintf('Subject%d', subjNum));
+    % Confirm the subject's merged EEG dataset is available.
     if ~isfile(fullfile(eegMergedPath, eegMergedFile))
         warning('C1_dRSA_run:MergedEEGMissing', ...
                 'Merged EEG dataset not found for Subject %02d (%s). Skipping.', ...
@@ -70,8 +149,28 @@ for subjNum = 1:numOfSubj
         continue;
     end
 
-    EEG_merged = pop_loadset(eegMergedFile, eegMergedPath);
+    % Reuse the reference EEG if available; otherwise load the subject data.
+    if subjNum == firstSubjectIdx && ~isempty(preloadedEEG)
+        EEG_merged = preloadedEEG;
+    else
+        EEG_merged = pop_loadset(eegMergedFile, eegMergedPath);
+    end
 
+    % Verify subject EEG matches the reference grid.
+    neural_len = size(EEG_merged.data, 2);
+    neural_fs = EEG_merged.srate;
+    if neural_len ~= referenceLen
+        error('C1_dRSA_run:NeuralLengthMismatch', ...
+            'Subject %02d EEG length (%d) differs from reference length (%d).', ...
+            subjNum, neural_len, referenceLen);
+    end
+    if abs(neural_fs - referenceFs) > 1e-6
+        warning('C1_dRSA_run:SamplingRateMismatch', ...
+            'Subject %02d EEG sampling rate (%.6f Hz) differs from reference (%.6f Hz).', ...
+            subjNum, neural_fs, referenceFs);
+    end
+
+    % Ensure every model has the same temporal length as the EEG.
     for modelNum = 1:numel(models.data)
         model_len = size(models.data{modelNum}, 2);
         if size(EEG_merged.data, 2) ~= model_len
@@ -81,6 +180,7 @@ for subjNum = 1:numOfSubj
         end
     end
 
+    % Load masks describing concatenation boundaries and bad EEG segments.
     mask_concat_file = fullfile(basePathMasks, 'mask_concat.mat');
     mask_bad_wins_file = fullfile(basePathMasks, 'bad_wins', sprintf('mask_bad_wins_Subject%02d.mat', subjNum));
 
@@ -101,14 +201,16 @@ for subjNum = 1:numOfSubj
     mask = {maskConcat.maskConcat; maskBadWins};
     maskLabels = {'6 sec junct pnts'; sprintf('Bad EEG windows Subject %d', subjNum)};
 
+    % Reshape EEG data to the tensor layout expected by dRSA.
     Y = reshape(EEG_merged.data, [1, 1, size(EEG_merged.data, 1), size(EEG_merged.data, 2)]);
 
+    % Configure dRSA options and sampling parameters.
     opt.SubSampleDurSec = 5;
     opt.nSubSamples = 300;
     opt.nIter = 100;
     opt.dRSA.corrMethod = 'corr';
     opt.dRSA.Normalize = 'Rescale';
-    opt.distanceMeasureModel = {'euclidean', 'euclidean'};
+    opt.distanceMeasureModel = [{'euclidean'}, repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];  
     opt.distanceMeasureNeural = 'correlation';
     opt.sampleDur = 1 / EEG_merged.srate;
     opt.SubSampleDur = round(opt.SubSampleDurSec / opt.sampleDur);
@@ -130,7 +232,9 @@ for subjNum = 1:numOfSubj
     cfg.SubSampleDir = paths.subsamples;
 
     [dRSA, nRSA, mRSA] = dRSA_coreFunction(Y, models, opt, cfg);
-    save(resultFile, 'dRSA', 'nRSA', 'mRSA', 'opt');
+    general_info.neural_fs = neural_fs;
+    general_info.preproc_type = preproc_type;
+    save(resultFile, 'dRSA', 'nRSA', 'mRSA', 'opt','general_info');
 
     fprintf('Saved dRSA results: %s\n', resultFile);
 
@@ -158,7 +262,7 @@ for subjNum = 1:numOfSubj
         [mRSA_diag_avg, mRSA_diag_std] = all_diagonal_averages(mRSA(:, :, model_num));
         [nRSA_diag_avg, nRSA_diag_std] = all_diagonal_averages(nRSA);
 
-        Fs = EEG_merged.srate;
+        Fs = general_info.neural_fs; %EEG_merged.srate;
         plot_dRSA_subj_avg(dRSA_diag_avg, dRSA_diag_std, ...
                            mRSA_diag_avg, mRSA_diag_std, ...
                            nRSA_diag_avg, nRSA_diag_std, ...
@@ -264,3 +368,4 @@ for model_num = 1:nModels
                        nRSA_diag_avg, nRSA_diag_std, ...
                        Fs_group, title_plot, lagWindowSec);
 end
+
