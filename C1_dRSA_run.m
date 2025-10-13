@@ -13,11 +13,11 @@ basePathEEG = paths.dataEEG;
 basePathMasks = paths.masks;
 basePathOutput = paths.results;
 basePathModels = paths.models;
-preproc_type = '0.01to20Hz';
-numOfSubj = 19;
-re_run_dRSA = false;
+preproc_type = '2to20Hz';
+numOfSubj = 1;
+re_run_dRSA = true;
 lagWindowSec = [-3 3];
-wav2vec2LayerIndices = [24]; % indices of wav2vec2 layers to include (e.g., [0 6 12 18 24])
+wav2vec2LayerIndices = [0 6 12 18 24]; % indices of wav2vec2 layers to include (e.g., [0 6 12 18 24])
 wav2vec2DistanceMeasure = 'correlation'; % distance measure for wav2vec2 models
 
 % Verify that essential directories exist (create outputs if needed).
@@ -41,14 +41,14 @@ else
     warning('C1_dRSA_run:EEGLABPathMissing', 'EEGLAB path not set in config_paths.json.');
 end
 
-hilbertModelPath = fullfile(basePathModels, 'Envelopes_Hilbert_128Hz', 'envelope_Hilbert.mat');
+% hilbertModelPath = fullfile(basePathModels, 'Envelopes_Hilbert_128Hz', 'envelope_Hilbert.mat');
 heilbModelPath = fullfile(basePathModels, 'Envelopes_Heilb_128Hz', 'envelope_Heilb.mat');
 wav2vec2MetadataPath = fullfile(basePathModels, 'wav2vec2', 'wav2vec2_embeddings.json');
 
 % Confirm required model artefacts are present before proceeding.
-if ~isfile(hilbertModelPath)
-    error('C1_dRSA_run:HilbertModelMissing', 'Hilbert envelope model not found: %s', hilbertModelPath);
-end
+% if ~isfile(hilbertModelPath)
+%     error('C1_dRSA_run:HilbertModelMissing', 'Hilbert envelope model not found: %s', hilbertModelPath);
+% end
 if ~isfile(heilbModelPath)
     error('C1_dRSA_run:HeilbronModelMissing', 'Heilbron envelope model not found: %s', heilbModelPath);
 end
@@ -68,7 +68,7 @@ if ~all(isLayerPresent)
         'Requested wav2vec2 layer indices not available: %s', num2str(missingLayers));
 end
 selectedLayerEntries = wav2vec2Metadata.layers(layerPositions);
-env_Hilbert = load(hilbertModelPath);
+% env_Hilbert = load(hilbertModelPath);
 env_Heilbron = load(heilbModelPath);
 
 % Identify a reference subject to establish the shared EEG grid to resample the wav2vec2 model.
@@ -123,8 +123,8 @@ for layerIdx = 1:numel(selectedLayerEntries)
 end
 
 % Package model matrices for the dRSA pipeline.
-models.data = [{env_Hilbert.env_model_data'}, {env_Heilbron.env_model_data'}, wav2vec2Resampled{:}];
-models.labels = [{'AudioEnvelopeHilbert'}, {'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}];
+models.data = [{env_Heilbron.env_model_data'}, wav2vec2Resampled{:}]; % {env_Hilbert.env_model_data'}, 
+models.labels = [{'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}]; %{'AudioEnvelopeHilbert'}, 
 
 % Iterate through subjects, executing the dRSA analysis as needed.
 for subjNum = 1:numOfSubj
@@ -210,7 +210,7 @@ for subjNum = 1:numOfSubj
     opt.nIter = 100;
     opt.dRSA.corrMethod = 'corr';
     opt.dRSA.Normalize = 'Rescale';
-    opt.distanceMeasureModel = [{'euclidean', 'euclidean'}, repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];
+    opt.distanceMeasureModel = [{'euclidean'}, repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];  
     opt.distanceMeasureNeural = 'correlation';
     opt.sampleDur = 1 / EEG_merged.srate;
     opt.SubSampleDur = round(opt.SubSampleDurSec / opt.sampleDur);
@@ -232,7 +232,9 @@ for subjNum = 1:numOfSubj
     cfg.SubSampleDir = paths.subsamples;
 
     [dRSA, nRSA, mRSA] = dRSA_coreFunction(Y, models, opt, cfg);
-    save(resultFile, 'dRSA', 'nRSA', 'mRSA', 'opt');
+    general_info.neural_fs = neural_fs;
+    general_info.preproc_type = preproc_type;
+    save(resultFile, 'dRSA', 'nRSA', 'mRSA', 'opt','general_info');
 
     fprintf('Saved dRSA results: %s\n', resultFile);
 
@@ -260,7 +262,7 @@ for subjNum = 1:numOfSubj
         [mRSA_diag_avg, mRSA_diag_std] = all_diagonal_averages(mRSA(:, :, model_num));
         [nRSA_diag_avg, nRSA_diag_std] = all_diagonal_averages(nRSA);
 
-        Fs = EEG_merged.srate;
+        Fs = general_info.neural_fs; %EEG_merged.srate;
         plot_dRSA_subj_avg(dRSA_diag_avg, dRSA_diag_std, ...
                            mRSA_diag_avg, mRSA_diag_std, ...
                            nRSA_diag_avg, nRSA_diag_std, ...
@@ -367,30 +369,3 @@ for model_num = 1:nModels
                        Fs_group, title_plot, lagWindowSec);
 end
 
-function resampled = upsample_wav2vec2_embeddings(wav2vec2Data, targetLen, targetFs)
-%UPSAMPLE_WAV2VEC2_EMBEDDINGS Interpolate wav2vec2 embeddings onto neural timeline.
-
-    required = {'embeddings', 'time_axis'};
-    if ~all(isfield(wav2vec2Data, required))
-        error('upsample_wav2vec2_embeddings:MissingFields', ...
-            'Expected fields missing from wav2vec2 data: %s', strjoin(required, ', '));
-    end
-
-    originalTimes = wav2vec2Data.time_axis(:);
-    embeddings = wav2vec2Data.embeddings;
-
-    if numel(originalTimes) ~= size(embeddings, 1)
-        error('upsample_wav2vec2_embeddings:TimeMismatch', ...
-            'Length of time axis (%d) does not match embedding rows (%d).', ...
-            numel(originalTimes), size(embeddings, 1));
-    end
-
-    startTime = originalTimes(1);
-    targetTimes = startTime + (0:targetLen - 1)' ./ targetFs;
-
-    embedClass = class(embeddings);
-    resampled = interp1(originalTimes, double(embeddings), targetTimes, 'linear', 'extrap');
-    if ~strcmp(embedClass, 'double')
-        resampled = cast(resampled, embedClass);
-    end
-end

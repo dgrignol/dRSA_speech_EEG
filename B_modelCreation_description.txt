@@ -1,7 +1,7 @@
 Creation of models:
 
-B1_Envelope script
-B2_wav2vec script
-B3_word2vec
+B1_model_Envelope.m script
+B2_model_wav2vec.m script just calls the B2_model_wav2vec.py companion (documentation in docs)
+B3_model_word2vec.m
 
 

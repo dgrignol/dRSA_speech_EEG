@@ -150,6 +150,8 @@ parfor idx = 1:numSubjects
     end
 
     subjectSummaries{idx} = localSummary;
+    pause(15)
+
 end
 
 % Summarize results once workers finish.
