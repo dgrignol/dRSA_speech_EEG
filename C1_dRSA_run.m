@@ -43,7 +43,6 @@ end
 
 % hilbertModelPath = fullfile(basePathModels, 'Envelopes_Hilbert_128Hz', 'envelope_Hilbert.mat');
 heilbModelPath = fullfile(basePathModels, 'Envelopes_Heilb_128Hz', 'envelope_Heilb.mat');
-wav2vec2MetadataPath = fullfile(basePathModels, 'wav2vec2', 'wav2vec2_embeddings.json');
 
 % Confirm required model artefacts are present before proceeding.
 % if ~isfile(hilbertModelPath)
@@ -52,92 +51,59 @@ wav2vec2MetadataPath = fullfile(basePathModels, 'wav2vec2', 'wav2vec2_embeddings
 if ~isfile(heilbModelPath)
     error('C1_dRSA_run:HeilbronModelMissing', 'Heilbron envelope model not found: %s', heilbModelPath);
 end
-if ~isfile(wav2vec2MetadataPath)
-    error('C1_dRSA_run:wav2vec2MetadataMissing', 'wav2vec2 metadata not found: %s', wav2vec2MetadataPath);
-end
-wav2vec2Metadata = jsondecode(fileread(wav2vec2MetadataPath));
-if ~isfield(wav2vec2Metadata, 'layers') || isempty(wav2vec2Metadata.layers)
-    error('C1_dRSA_run:wav2vec2LayersMissing', ...
-        'wav2vec2 metadata does not describe layer MAT files: %s', wav2vec2MetadataPath);
-end
-layerIndicesAvailable = arrayfun(@(layer) layer.index, wav2vec2Metadata.layers);
-[isLayerPresent, layerPositions] = ismember(wav2vec2LayerIndices, layerIndicesAvailable);
-if ~all(isLayerPresent)
-    missingLayers = wav2vec2LayerIndices(~isLayerPresent);
-    error('C1_dRSA_run:wav2vec2LayerNotFound', ...
-        'Requested wav2vec2 layer indices not available: %s', num2str(missingLayers));
-end
-selectedLayerEntries = wav2vec2Metadata.layers(layerPositions);
-% env_Hilbert = load(hilbertModelPath);
 env_Heilbron = load(heilbModelPath);
 
-% Identify a reference subject to establish the shared EEG grid to resample the wav2vec2 model.
-referenceLen = [];
-referenceFs = [];
-preloadedEEG = [];
-firstSubjectIdx = NaN;
-for subjProbe = 1:numOfSubj
-    eegCandidateFile = sprintf('Subject%d_ICA_rej_preproc%s_merged.set', subjProbe, preproc_type);
-    eegCandidatePath = fullfile(basePathEEG, sprintf('Subject%d', subjProbe));
-    candidateFullPath = fullfile(eegCandidatePath, eegCandidateFile);
-    if isfile(candidateFullPath)
-        preloadedEEG = pop_loadset(eegCandidateFile, eegCandidatePath);
-        referenceLen = size(preloadedEEG.data, 2);
-        referenceFs = preloadedEEG.srate;
-        firstSubjectIdx = subjProbe;
-        fprintf('Using Subject %02d to define wav2vec2 resampling grid (%d samples @ %.2f Hz).\n', ...
-            subjProbe, referenceLen, referenceFs);
-        break;
-    end
+[referenceInfo, wav2vec2Models] = prepare_wav2vec2_models( ...
+    basePathModels, basePathEEG, preproc_type, numOfSubj, wav2vec2LayerIndices);
+referenceLen = referenceInfo.length;
+referenceFs = referenceInfo.fs;
+preloadedEEG = referenceInfo.preloadedEEG;
+firstSubjectIdx = referenceInfo.firstSubjectIdx;
+wav2vec2Resampled = wav2vec2Models.data;
+wav2vec2Labels = wav2vec2Models.labels;
+
+% Load resampled raw audio stimulus and align with reference grid.
+rawAudioPath = fullfile(paths.dataStimuli, 'Audio', 'audio_resampled_merged.wav');
+if ~isfile(rawAudioPath)
+    error('C1_dRSA_run:RawAudioMissing', 'Resampled audio model not found: %s', rawAudioPath);
+end
+[rawAudio, rawAudioFs] = audioread(rawAudioPath);
+if size(rawAudio, 2) > 1
+    rawAudio = mean(rawAudio, 2); % collapse stereo to mono if needed
 end
 
-% Abort if no EEG dataset could be located.
-if isempty(referenceLen)
-    error('C1_dRSA_run:NoEEGFound', ...
-        'Unable to locate any merged EEG dataset to define wav2vec2 resampling.');
+if abs(rawAudioFs - referenceFs) > 1e-6
+    error('C1_dRSA_run:RawAudioFsMismatch', ...
+        'Raw audio sampling rate (%.6f Hz) differs from reference (%.6f Hz).', rawAudioFs, referenceFs);
 end
 
-% Upsample the selected wav2vec2 embeddings once using the reference EEG grid.
-wav2vec2FieldsRequired = {'embeddings', 'time_axis'};
-wav2vec2Resampled = cell(1, numel(selectedLayerEntries));
-wav2vec2Labels = cell(1, numel(selectedLayerEntries));
-for layerIdx = 1:numel(selectedLayerEntries)
-    layerMatPath = fullfile(basePathModels, 'wav2vec2', selectedLayerEntries(layerIdx).mat_file);
-    if ~isfile(layerMatPath)
-        error('C1_dRSA_run:wav2vec2LayerMissing', ...
-            'wav2vec2 layer file not found: %s', layerMatPath);
-    end
-    wav2vec2LayerData = load(layerMatPath);
-    if ~all(isfield(wav2vec2LayerData, wav2vec2FieldsRequired))
-        error('C1_dRSA_run:wav2vec2FieldsMissing', ...
-            'wav2vec2 layer file %s missing fields: %s', layerMatPath, strjoin(wav2vec2FieldsRequired, ', '));
-    end
-    wav2vec2Resampled{layerIdx} = upsample_wav2vec2_embeddings(wav2vec2LayerData, referenceLen, referenceFs)';
-    layerLabel = selectedLayerEntries(layerIdx).label;
-    if isstring(layerLabel) || ischar(layerLabel)
-        layerLabel = char(layerLabel);
-    else
-        layerLabel = sprintf('layer%d', selectedLayerEntries(layerIdx).index);
-    end
-    wav2vec2Labels{layerIdx} = sprintf('wav2vec2.%s', layerLabel);
+rawAudio = rawAudio'; % ensure row orientation
+if size(rawAudio, 2) ~= referenceLen
+    error('C1_dRSA_run:RawAudioLengthMismatch', ...
+        'Raw audio length (%d) differs from reference length (%d).', numel(rawAudio), referenceLen);
 end
 
 % Package model matrices for the dRSA pipeline.
-models.data = [{env_Heilbron.env_model_data'}, wav2vec2Resampled{:}]; % {env_Hilbert.env_model_data'}, 
-models.labels = [{'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}]; %{'AudioEnvelopeHilbert'}, 
+models.data = [{rawAudio}, {env_Heilbron.env_model_data'}, wav2vec2Resampled{:}];
+models.labels = [{'rawAudio'}, {'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}];
 
 % Iterate through subjects, executing the dRSA analysis as needed.
 for subjNum = 1:numOfSubj
     fprintf('\nSubject %02d\n', subjNum);
-    resultFile = fullfile(basePathOutput, sprintf('dRSA_%s_subj%02d.mat', preproc_type, subjNum));
+    resultPattern = sprintf('*_dRSA_%s_subj%02d.mat', preproc_type, subjNum);
+    existingResults = dir(fullfile(basePathOutput, resultPattern));
 
     % Skip subjects with existing results unless re-run is requested.
-    if ~re_run_dRSA && isfile(resultFile)
-        fprintf('Skipping subject %02d: existing results %s\n', subjNum, resultFile);
+    if ~re_run_dRSA && ~isempty(existingResults)
+        fprintf('Skipping subject %02d: existing results %s\n', subjNum, existingResults(1).name);
         continue;
-    elseif isfile(resultFile) && re_run_dRSA
-        fprintf('Re-running dRSA (overwrite enabled).\n');
+    elseif ~isempty(existingResults) && re_run_dRSA
+        fprintf('Re-running dRSA (overwrite enabled). Previous results: %s\n', existingResults(1).name);
     end
+
+    timestampPrefix = char(datetime('now', 'Format', 'yyyy-MM-dd-HH-mm'));
+    resultFileName = sprintf('%s_dRSA_%s_subj%02d.mat', timestampPrefix, preproc_type, subjNum);
+    resultFile = fullfile(basePathOutput, resultFileName);
 
     eegMergedFile = sprintf('Subject%d_ICA_rej_preproc%s_merged.set', subjNum, preproc_type);
     eegMergedPath = fullfile(basePathEEG, sprintf('Subject%d', subjNum));
@@ -210,7 +176,7 @@ for subjNum = 1:numOfSubj
     opt.nIter = 100;
     opt.dRSA.corrMethod = 'corr';
     opt.dRSA.Normalize = 'Rescale';
-    opt.distanceMeasureModel = [{'euclidean'}, repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];  
+    opt.distanceMeasureModel = [{'euclidean'}, {'euclidean'}, repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];
     opt.distanceMeasureNeural = 'correlation';
     opt.sampleDur = 1 / EEG_merged.srate;
     opt.SubSampleDur = round(opt.SubSampleDurSec / opt.sampleDur);
@@ -270,7 +236,7 @@ for subjNum = 1:numOfSubj
     end
 end
 
-dRSA_files = dir(fullfile(basePathOutput, sprintf('dRSA_%s_subj*.mat', preproc_type)));
+dRSA_files = dir(fullfile(basePathOutput, sprintf('*_dRSA_%s_subj*.mat', preproc_type)));
 if isempty(dRSA_files)
     warning('C1_dRSA_run:NoResults', 'No dRSA results found. Skipping group averaging.');
     return;
@@ -282,7 +248,12 @@ optGroup = [];
 for fileIdx = 1:numel(dRSA_files)
     tmp = load(fullfile(dRSA_files(fileIdx).folder, dRSA_files(fileIdx).name), ...
                'dRSA', 'mRSA', 'nRSA', 'opt');
-    subjNum = sscanf(dRSA_files(fileIdx).name, ['dRSA_' preproc_type '_subj%02d.mat']);
+    token = regexp(dRSA_files(fileIdx).name, ['_dRSA_' preproc_type '_subj(\d{2})\.mat'], 'tokens', 'once');
+    if ~isempty(token)
+        subjNum = str2double(token{1});
+    else
+        subjNum = [];
+    end
     if isempty(subjNum)
         subjNum = fileIdx;
     end
@@ -368,4 +339,3 @@ for model_num = 1:nModels
                        nRSA_diag_avg, nRSA_diag_std, ...
                        Fs_group, title_plot, lagWindowSec);
 end
-
