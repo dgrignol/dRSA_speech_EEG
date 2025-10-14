@@ -1,7 +1,6 @@
 Creation of models:
 
 B1_model_Envelope.m script
-B2_model_wav2vec.m script just calls the B2_model_wav2vec.py companion (documentation in docs)
-B3_model_word2vec.m
-
+ B2_model_wav2vec.m script builds deep audio representations via the Python helper B2_model_wav2vec2.py (see docs)
+ B3_model_word2vec.m constructs time-aligned semantic embeddings using pretrained word2vec
 
