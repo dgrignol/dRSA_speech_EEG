@@ -3,6 +3,11 @@ clearvars;
 close all;
 clc;
 
+referenceFs = 128;
+referenceLen = 464572;
+firstSubjectIdx = 1;
+preloadedEEG = [];
+
 % Load repository path configuration and add required helper folders.
 paths = load_paths_config();
 addpath(paths.eeglab)
@@ -53,14 +58,14 @@ if ~isfile(heilbModelPath)
 end
 env_Heilbron = load(heilbModelPath);
 
-[referenceInfo, wav2vec2Models] = prepare_wav2vec2_models( ...
-    basePathModels, basePathEEG, preproc_type, numOfSubj, wav2vec2LayerIndices);
-referenceLen = referenceInfo.length;
-referenceFs = referenceInfo.fs;
-preloadedEEG = referenceInfo.preloadedEEG;
-firstSubjectIdx = referenceInfo.firstSubjectIdx;
-wav2vec2Resampled = wav2vec2Models.data;
-wav2vec2Labels = wav2vec2Models.labels;
+% [referenceInfo, wav2vec2Models] = prepare_wav2vec2_models( ...
+%     basePathModels, basePathEEG, preproc_type, numOfSubj, wav2vec2LayerIndices);
+% referenceLen = referenceInfo.length;
+% referenceFs = referenceInfo.fs;
+% preloadedEEG = referenceInfo.preloadedEEG;
+% firstSubjectIdx = referenceInfo.firstSubjectIdx;
+% wav2vec2Resampled = wav2vec2Models.data;
+% wav2vec2Labels = wav2vec2Models.labels;
 
 % Load resampled raw audio stimulus and align with reference grid.
 rawAudioPath = fullfile(paths.dataStimuli, 'Audio', 'audio_resampled_merged.wav');
@@ -83,9 +88,12 @@ if size(rawAudio, 2) ~= referenceLen
         'Raw audio length (%d) differs from reference length (%d).', numel(rawAudio), referenceLen);
 end
 
+% Load word 2 vec
+load([paths.models '/word2vec/' 'word2vec_model_GoogleNews_negative300.mat'])
+
 % Package model matrices for the dRSA pipeline.
-models.data = [{rawAudio}, {env_Heilbron.env_model_data'}, wav2vec2Resampled{:}];
-models.labels = [{'rawAudio'}, {'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}];
+models.data = [{word2vec_model_data},  {env_Heilbron.env_model_data'},{rawAudio}];%[{rawAudio}, {env_Heilbron.env_model_data'}, wav2vec2Resampled{:}];
+models.labels = [{'word2vecGoogleNews'}, {'AudioEnvelopeHeilbron'},{'rawAudio'}]; %[{'rawAudio'}, {'AudioEnvelopeHeilbron'}, wav2vec2Labels{:}];
 
 % Iterate through subjects, executing the dRSA analysis as needed.
 for subjNum = 1:numOfSubj
@@ -176,7 +184,7 @@ for subjNum = 1:numOfSubj
     opt.nIter = 100;
     opt.dRSA.corrMethod = 'corr';
     opt.dRSA.Normalize = 'Rescale';
-    opt.distanceMeasureModel = [{'euclidean'}, {'euclidean'}, repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];
+    opt.distanceMeasureModel = [{'correlation'}, {'euclidean'},{'euclidean1'}];% repmat({wav2vec2DistanceMeasure}, 1, numel(wav2vec2Resampled))];
     opt.distanceMeasureNeural = 'correlation';
     opt.sampleDur = 1 / EEG_merged.srate;
     opt.SubSampleDur = round(opt.SubSampleDurSec / opt.sampleDur);
